@@ -87,6 +87,38 @@ public class WellfoundScraper {
     }
     
     /**
+     * Scrape jobs from a company jobs URL
+     */
+    public List<WellfoundJobPosting> scrapeJobsFromUrl(String jobsUrl) {
+        logger.info("Scraping jobs from URL: {}", jobsUrl);
+        
+        try {
+            rateLimiter.acquire();
+            
+            // Extract company slug from URL
+            String companySlug = extractCompanySlugFromUrl(jobsUrl);
+            if (companySlug == null) {
+                logger.warn("Could not extract company slug from URL: {}", jobsUrl);
+                return new ArrayList<>();
+            }
+            
+            // Create company object
+            Company company = new Company();
+            company.setSlug(companySlug);
+            company.setName(companySlug); // Will be updated during extraction if available
+            
+            List<WellfoundJobPosting> jobs = extractJobsFromUrl(jobsUrl, company);
+            logger.info("Found {} jobs from URL: {}", jobs.size(), jobsUrl);
+            return jobs;
+            
+        } catch (Exception e) {
+            logger.error("Error scraping jobs from URL {}: {}", jobsUrl, e.getMessage());
+            failedExtractions++;
+            return new ArrayList<>();
+        }
+    }
+    
+    /**
      * Scrape jobs for a specific company
      */
     public List<WellfoundJobPosting> scrapeCompanyJobs(Company company) {
@@ -538,6 +570,28 @@ public class WellfoundScraper {
         builder.addHeader("User-Agent", userAgent);
         
         return builder.build();
+    }
+    
+    /**
+     * Extract company slug from jobs URL
+     * URL format: https://wellfound.com/company/{slug}/jobs
+     */
+    private String extractCompanySlugFromUrl(String jobsUrl) {
+        try {
+            if (jobsUrl != null && jobsUrl.contains("/company/")) {
+                String[] parts = jobsUrl.split("/company/");
+                if (parts.length > 1) {
+                    String remaining = parts[1];
+                    String[] slugParts = remaining.split("/");
+                    if (slugParts.length > 0 && !slugParts[0].isEmpty()) {
+                        return slugParts[0];
+                    }
+                }
+            }
+        } catch (Exception e) {
+            logger.debug("Error extracting company slug from URL {}: {}", jobsUrl, e.getMessage());
+        }
+        return null;
     }
     
     /**

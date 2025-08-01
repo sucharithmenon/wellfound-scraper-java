@@ -249,6 +249,31 @@ public class DatabaseService {
     }
     
     /**
+     * Get company URLs from job_source_urls table for job scraping
+     */
+    public List<String> getCompanyUrlsForScraping() {
+        List<String> urls = new ArrayList<>();
+        
+        String sql = "SELECT url FROM job_source_urls WHERE source_type = 'wellfound' AND status = 'active' ORDER BY total_jobs_found DESC NULLS LAST";
+        
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement stmt = conn.prepareStatement(sql);
+             ResultSet rs = stmt.executeQuery()) {
+            
+            while (rs.next()) {
+                urls.add(rs.getString("url"));
+            }
+            
+            logger.info("Retrieved {} company URLs for job scraping", urls.size());
+            
+        } catch (SQLException e) {
+            logger.error("Error retrieving company URLs: {}", e.getMessage());
+        }
+        
+        return urls;
+    }
+    
+    /**
      * Get all companies from database
      */
     public List<Company> getCompanies() {

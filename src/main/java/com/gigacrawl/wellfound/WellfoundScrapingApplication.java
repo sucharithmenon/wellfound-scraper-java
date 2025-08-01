@@ -53,6 +53,10 @@ public class WellfoundScrapingApplication {
                 scrapeJobs(args);
                 break;
                 
+            case "--jobs-from-db":
+                scrapeJobsFromDatabase(args);
+                break;
+                
             case "--full":
                 runFullScrape(args);
                 break;
@@ -82,17 +86,19 @@ public class WellfoundScrapingApplication {
         System.out.println("Usage: java -jar wellfound-scraper.jar <command> [options]");
         System.out.println();
         System.out.println("Commands:");
-        System.out.println("  --companies [pages]    Scrape companies (default: 10 pages)");
-        System.out.println("  --jobs [company-slug]  Scrape jobs for specific company");
-        System.out.println("  --full [pages]         Run full scrape (companies + jobs)");
-        System.out.println("  --stats               Show database statistics");
-        System.out.println("  --test-db             Test database connection");
-        System.out.println("  --version             Show version information");
-        System.out.println("  --help                Show this help message");
+        System.out.println("  --companies [pages]       Scrape companies to job_source_urls (default: 10 pages)");
+        System.out.println("  --jobs [company-slug]     Scrape jobs for specific company");
+        System.out.println("  --jobs-from-db [limit]    Scrape jobs from job_source_urls table");
+        System.out.println("  --full [pages]            Run full scrape (companies + jobs)");
+        System.out.println("  --stats                   Show database statistics");
+        System.out.println("  --test-db                 Test database connection");
+        System.out.println("  --version                 Show version information");
+        System.out.println("  --help                    Show this help message");
         System.out.println();
         System.out.println("Examples:");
         System.out.println("  java -jar wellfound-scraper.jar --companies 5");
         System.out.println("  java -jar wellfound-scraper.jar --jobs openai");
+        System.out.println("  java -jar wellfound-scraper.jar --jobs-from-db 50");
         System.out.println("  java -jar wellfound-scraper.jar --full 20");
     }
     
@@ -103,6 +109,11 @@ public class WellfoundScrapingApplication {
         System.out.println("  DATABASE_URL          PostgreSQL connection URL");
         System.out.println("  DB_USERNAME           Database username (default: cursor)");
         System.out.println("  DB_PASSWORD           Database password (default: cursor_password)");
+        System.out.println();
+        System.out.println("Workflow:");
+        System.out.println("  1. --companies: Scrape companies → job_source_urls table");
+        System.out.println("  2. --jobs-from-db: Read URLs from job_source_urls → scrape jobs → ats_job_postings");
+        System.out.println("  3. --full: Combines both phases automatically");
         System.out.println();
         System.out.println("Features:");
         System.out.println("  - Multi-strategy extraction (JSON + HTML parsing)");
@@ -240,6 +251,114 @@ public class WellfoundScrapingApplication {
         }
     }
     
+    private static void scrapeJobsFromDatabase(String[] args) {
+        int maxUrls = 50; // default
+        
+        if (args.length > 1) {
+            try {
+                maxUrls = Integer.parseInt(args[1]);
+            } catch (NumberFormatException e) {
+                System.err.println("Invalid URL limit: " + args[1]);
+                return;
+            }
+        }
+        
+        System.out.println("=== Wellfound Jobs from Database ===");
+        System.out.println("Max URLs to process: " + maxUrls);
+        System.out.println("Started: " + LocalDateTime.now().format(TIMESTAMP_FORMAT));
+        System.out.println();
+        
+        long startTime = System.currentTimeMillis();
+        
+        try {
+            WellfoundScraper scraper = new WellfoundScraper();
+            DatabaseService dbService = new DatabaseService();
+            
+            // Test database connection
+            if (!dbService.testConnection()) {
+                System.err.println("❌ Database connection failed");
+                return;
+            }
+            
+            System.out.println("✅ Database connection successful");
+            
+            // Get company URLs from database
+            List<String> companyUrls = dbService.getCompanyUrlsForScraping();
+            
+            if (companyUrls.isEmpty()) {
+                System.out.println("❌ No company URLs found in job_source_urls table");
+                System.out.println("💡 Run --companies first to populate the database");
+                return;
+            }
+            
+            // Limit URLs if specified
+            if (companyUrls.size() > maxUrls) {
+                companyUrls = companyUrls.subList(0, maxUrls);
+            }
+            
+            System.out.println("✅ Found " + companyUrls.size() + " company URLs to process");
+            
+            // Process URLs with concurrent execution
+            ExecutorService executor = Executors.newFixedThreadPool(3);
+            List<WellfoundJobPosting> allJobs = new java.util.concurrent.CopyOnWriteArrayList<>();
+            
+            for (String url : companyUrls) {
+                executor.submit(() -> {
+                    try {
+                        List<WellfoundJobPosting> jobs = scraper.scrapeJobsFromUrl(url);
+                        allJobs.addAll(jobs);
+                        System.out.println("✅ " + url + ": " + jobs.size() + " jobs");
+                    } catch (Exception e) {
+                        System.err.println("❌ Error processing " + url + ": " + e.getMessage());
+                    }
+                });
+            }
+            
+            executor.shutdown();
+            try {
+                if (!executor.awaitTermination(30, TimeUnit.MINUTES)) {
+                    executor.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                executor.shutdownNow();
+                Thread.currentThread().interrupt();
+            }
+            
+            // Save jobs to database
+            int savedJobs = 0;
+            if (!allJobs.isEmpty()) {
+                savedJobs = dbService.saveJobsBatch(allJobs);
+            }
+            
+            long duration = System.currentTimeMillis() - startTime;
+            
+            System.out.println();
+            System.out.println("=== RESULTS ===");
+            System.out.println("URLs processed: " + companyUrls.size());
+            System.out.println("Jobs found: " + allJobs.size());
+            System.out.println("Jobs saved: " + savedJobs);
+            System.out.println("Success rate: " + String.format("%.1f%%", 
+                    companyUrls.size() > 0 ? (double) savedJobs / allJobs.size() * 100 : 0));
+            System.out.println("Duration: " + String.format("%.1f", duration / 1000.0) + "s");
+            
+            // Quality statistics
+            if (!allJobs.isEmpty()) {
+                double avgQuality = allJobs.stream()
+                        .mapToDouble(job -> job.getExtractionSuccessScore() != null ? job.getExtractionSuccessScore() : 0.0)
+                        .average()
+                        .orElse(0.0);
+                
+                System.out.println("Average quality score: " + String.format("%.1f%%", avgQuality));
+            }
+            
+            dbService.close();
+            
+        } catch (Exception e) {
+            System.err.println("❌ Error during database job scraping: " + e.getMessage());
+            logger.error("Database job scraping failed", e);
+        }
+    }
+    
     private static void runFullScrape(String[] args) {
         int maxPages = 20; // default for full scrape
         
@@ -284,20 +403,25 @@ public class WellfoundScrapingApplication {
             int savedCompanies = dbService.saveCompaniesBatch(companies);
             System.out.println("✅ Saved " + savedCompanies + " companies");
             
-            // Phase 2: Scrape jobs for each company (concurrent processing)
-            System.out.println("\n--- Phase 2: Scraping Jobs ---");
+            // Phase 2: Scrape jobs from saved company URLs (concurrent processing)
+            System.out.println("\n--- Phase 2: Scraping Jobs from Database ---");
+            
+            // Get the URLs we just saved
+            List<String> companyUrls = dbService.getCompanyUrlsForScraping();
+            System.out.println("Found " + companyUrls.size() + " company URLs to process for jobs");
             
             ExecutorService executor = Executors.newFixedThreadPool(3); // Limit concurrent threads
             List<WellfoundJobPosting> allJobs = new java.util.concurrent.CopyOnWriteArrayList<>();
             
-            for (Company company : companies) {
+            for (String url : companyUrls) {
                 executor.submit(() -> {
                     try {
-                        List<WellfoundJobPosting> jobs = scraper.scrapeCompanyJobs(company);
+                        List<WellfoundJobPosting> jobs = scraper.scrapeJobsFromUrl(url);
                         allJobs.addAll(jobs);
-                        System.out.println("✅ " + company.getName() + ": " + jobs.size() + " jobs");
+                        String companyName = extractCompanyNameFromUrl(url);
+                        System.out.println("✅ " + companyName + ": " + jobs.size() + " jobs");
                     } catch (Exception e) {
-                        System.err.println("❌ Error scraping jobs for " + company.getName() + ": " + e.getMessage());
+                        System.err.println("❌ Error scraping jobs from " + url + ": " + e.getMessage());
                     }
                 });
             }
@@ -399,5 +523,26 @@ public class WellfoundScrapingApplication {
             System.err.println("❌ Database test failed: " + e.getMessage());
             logger.error("Database test failed", e);
         }
+    }
+    
+    /**
+     * Extract company name from jobs URL for display purposes
+     */
+    private static String extractCompanyNameFromUrl(String url) {
+        try {
+            if (url != null && url.contains("/company/")) {
+                String[] parts = url.split("/company/");
+                if (parts.length > 1) {
+                    String remaining = parts[1];
+                    String[] slugParts = remaining.split("/");
+                    if (slugParts.length > 0 && !slugParts[0].isEmpty()) {
+                        return slugParts[0];
+                    }
+                }
+            }
+        } catch (Exception e) {
+            // Fall back to URL
+        }
+        return url;
     }
 }

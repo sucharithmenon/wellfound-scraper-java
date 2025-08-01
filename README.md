@@ -45,6 +45,21 @@ java -jar target/wellfound-scraper-1.0.0.jar --help
 
 ### Command Line Interface
 
+#### Two-Phase Workflow (Recommended)
+
+```bash
+# Phase 1: Scrape companies to job_source_urls table
+java -jar wellfound-scraper-1.0.0.jar --companies 10
+
+# Phase 2: Scrape jobs from job_source_urls to ats_job_postings table  
+java -jar wellfound-scraper-1.0.0.jar --jobs-from-db 100
+
+# OR: Run both phases automatically
+java -jar wellfound-scraper-1.0.0.jar --full 20
+```
+
+#### Additional Commands
+
 ```bash
 # Show version and capabilities
 java -jar wellfound-scraper-1.0.0.jar --version
@@ -52,14 +67,8 @@ java -jar wellfound-scraper-1.0.0.jar --version
 # Test database connection
 java -jar wellfound-scraper-1.0.0.jar --test-db
 
-# Scrape companies (10 pages by default)
-java -jar wellfound-scraper-1.0.0.jar --companies 5
-
-# Scrape jobs for specific company
+# Scrape jobs for specific company (direct)
 java -jar wellfound-scraper-1.0.0.jar --jobs openai
-
-# Full scrape (companies + all jobs)
-java -jar wellfound-scraper-1.0.0.jar --full 20
 
 # Show database statistics
 java -jar wellfound-scraper-1.0.0.jar --stats
@@ -111,17 +120,18 @@ wellfound-scraper-java/
 
 Compatible with Gigacrawl database schema:
 
-#### Companies → `job_source_urls` table
+#### Phase 1: Companies → `job_source_urls` table
 ```sql
-- url (company jobs URL)
+- url (company jobs URL: https://wellfound.com/company/{slug}/jobs)
 - source_type ('wellfound')  
 - company_name
-- company_identifier (slug)
+- company_identifier (company slug)
 - total_jobs_found
 - metadata (JSONB with full company data)
+- status ('active' for processing)
 ```
 
-#### Jobs → `ats_job_postings` table
+#### Phase 2: Jobs → `ats_job_postings` table  
 ```sql
 - ats_job_id, ats_type ('wellfound')
 - title, description, location, job_type
@@ -131,6 +141,13 @@ Compatible with Gigacrawl database schema:
 - extraction_success_score, quality_grade
 - native_data (JSONB with raw job data)
 ```
+
+### Two-Phase Workflow Benefits
+
+1. **Database-Driven**: URLs stored in `job_source_urls` can be processed independently
+2. **Resumable**: Failed job extractions can be retried without re-scraping companies
+3. **Scalable**: Different processes can handle company discovery vs job extraction
+4. **Traceable**: Full audit trail of company discovery and job extraction status
 
 ## ⚙️ Configuration
 
